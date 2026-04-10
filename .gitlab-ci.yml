@@ -1,0 +1,53 @@
+# ============================================================
+# GitLab CI — SBTI 人格测试
+# 触发：push 到 main / 手动触发
+# ============================================================
+
+stages:
+  - build
+  - deploy
+
+variables:
+  NODE_VERSION: "20"
+  BUILD_DIR: "dist"
+  CACHE_KEY: "$CI_COMMIT_REF_SLUG"
+
+cache:
+  key: ${CACHE_KEY}
+  paths:
+    - node_modules/
+
+# ============================================================
+# 构建阶段
+# ============================================================
+build:
+  stage: build
+  image: node:${NODE_VERSION}-alpine
+  before_script:
+    - npm ci --cache .npm
+  script:
+    - npm run build
+    - echo "Build complete: $(find $BUILD_DIR -type f | wc -l) files"
+  artifacts:
+    paths:
+      - ${BUILD_DIR}/
+    expire_in: 1 week
+  rules:
+    - if: $CI_COMMIT_BRANCH == "main"
+    - if: $CI_PIPELINE_SOURCE == "web"
+
+# ============================================================
+# GitLab Pages 部署（自动）
+# ============================================================
+pages:
+  stage: deploy
+  image: alpine:latest
+  dependencies:
+    - build
+  script:
+    - mv ${BUILD_DIR} public
+  artifacts:
+    paths:
+      - public
+  rules:
+    - if: $CI_COMMIT_BRANCH == "main"

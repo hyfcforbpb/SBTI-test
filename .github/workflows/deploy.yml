@@ -1,0 +1,290 @@
+name: Multi-Platform Deploy
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      deploy_target:
+        required: false
+        default: all
+
+concurrency:
+  group: deploy-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: write
+  pages: write
+  id-token: write
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+  NODE_VERSION: 20
+  BUILD_DIR: dist
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+      - run: npm ci
+      - run: npx tsc --noEmit
+      - run: npm run build
+      - run: |
+          find dist -type l -delete
+          find dist -xtype l -delete
+          chmod -R 755 dist
+      - run: |
+          if [ ! -d "dist" ]; then exit 1; fi
+          FILE_COUNT=$(find dist -type f | wc -l)
+          if [ "$FILE_COUNT" -lt 3 ]; then exit 1; fi
+      - uses: actions/upload-artifact@v4
+        with:
+          name: sbti-dist
+          path: dist
+          retention-days: 7
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: dist
+
+  package:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: sbti-dist
+          path: dist
+      - run: |
+          VERSION=$(node -p "require('./package.json').version")
+          SHORT_SHA=${GITHUB_SHA::8}
+          mkdir -p /tmp/netlify && cp -r dist/* /tmp/netlify/ && cp netlify.toml /tmp/netlify/ && cd /tmp/netlify && zip -r /tmp/sbti-deploy-netlify.zip . && cd -
+          mkdir -p /tmp/cloudflare && cp -r dist/* /tmp/cloudflare/ && cp wrangler.toml /tmp/cloudflare/ && cd /tmp/cloudflare && zip -r /tmp/sbti-deploy-cloudflare.zip . && cd -
+          mkdir -p /tmp/edgeone && cp -r dist/* /tmp/edgeone/ && cp edgeone.json /tmp/edgeone/ && cd /tmp/edgeone && zip -r /tmp/sbti-deploy-edgeone.zip . && cd -
+          mkdir -p /tmp/vercel && cp -r dist/* /tmp/vercel/ && cp vercel.json /tmp/vercel/ && cd /tmp/vercel && zip -r /tmp/sbti-deploy-vercel.zip . && cd -
+          mkdir -p /tmp/github-pages && cp -r dist/* /tmp/github-pages/ && touch /tmp/github-pages/.nojekyll && cd /tmp/github-pages && zip -r /tmp/sbti-deploy-github-pages.zip . && cd -
+          mkdir -p /tmp/gitee-pages && cp -r dist/* /tmp/gitee-pages/ && cp scripts/deploy-pages.sh /tmp/gitee-pages/ && cd /tmp/gitee-pages && zip -r /tmp/sbti-deploy-gitee-pages.zip . && cd -
+          mkdir -p /tmp/gitlab-pages && cp -r dist/* /tmp/gitlab-pages/ && cp .gitlab-ci.yml /tmp/gitlab-pages/ && cd /tmp/gitlab-pages && zip -r /tmp/sbti-deploy-gitlab-pages.zip . && cd -
+          mkdir -p /tmp/static && cp -r dist/* /tmp/static/ && echo "/* /index.html 200" > /tmp/static/_redirects && cd /tmp/static && zip -r /tmp/sbti-deploy-static.zip . && cd -
+          mkdir -p /tmp/all && cp /tmp/sbti-deploy-*.zip /tmp/all/ && cd /tmp/all && zip -r /tmp/sbti-deploy-all-v${VERSION}-${SHORT_SHA}.zip . && cd -
+      - uses: actions/upload-artifact@v4
+        with:
+          name: deploy-netlify
+          path: /tmp/sbti-deploy-netlify.zip
+          retention-days: 30
+      - uses: actions/upload-artifact@v4
+        with:
+          name: deploy-cloudflare
+          path: /tmp/sbti-deploy-cloudflare.zip
+          retention-days: 30
+      - uses: actions/upload-artifact@v4
+        with:
+          name: deploy-edgeone
+          path: /tmp/sbti-deploy-edgeone.zip
+          retention-days: 30
+      - uses: actions/upload-artifact@v4
+        with:
+          name: deploy-vercel
+          path: /tmp/sbti-deploy-vercel.zip
+          retention-days: 30
+      - uses: actions/upload-artifact@v4
+        with:
+          name: deploy-github-pages
+          path: /tmp/sbti-deploy-github-pages.zip
+          retention-days: 30
+      - uses: actions/upload-artifact@v4
+        with:
+          name: deploy-gitee-pages
+          path: /tmp/sbti-deploy-gitee-pages.zip
+          retention-days: 30
+      - uses: actions/upload-artifact@v4
+        with:
+          name: deploy-gitlab-pages
+          path: /tmp/sbti-deploy-gitlab-pages.zip
+          retention-days: 30
+      - uses: actions/upload-artifact@v4
+        with:
+          name: deploy-static-universal
+          path: /tmp/sbti-deploy-static.zip
+          retention-days: 30
+      - uses: actions/upload-artifact@v4
+        with:
+          name: deploy-all-platforms-bundle
+          path: /tmp/sbti-deploy-all-*.zip
+          retention-days: 30
+      - run: |
+          mkdir -p /tmp/release-assets
+          cp /tmp/sbti-deploy-*.zip /tmp/release-assets/
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-assets
+          path: /tmp/release-assets/
+          retention-days: 30
+
+  release:
+    needs: [build,package]
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - uses: actions/download-artifact@v4
+        with:
+          name: release-assets
+          path: /tmp/release-assets
+      - name: Get version & commit
+        id: version
+        run: |
+          VERSION=$(node -p "require('./package.json').version")
+          SHORT_SHA=${GITHUB_SHA::8}
+          echo "VERSION=$VERSION" >> $GITHUB_ENV
+          echo "SHORT_SHA=$SHORT_SHA" >> $GITHUB_ENV
+          echo "tag=v${VERSION}-${SHORT_SHA}" >> $GITHUB_OUTPUT
+          echo "release_name=SBTI v${VERSION}" >> $GITHUB_OUTPUT
+      - name: Generate release notes
+        run: |
+          cat > /tmp/notes.md << EOF
+          ## SBTI v${VERSION}
+          Commit: ${SHORT_SHA}
+          EOF
+      - uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.version.outputs.tag }}
+          name: ${{ steps.version.outputs.release_name }}
+          body_path: /tmp/notes.md
+          draft: false
+          prerelease: false
+          files: /tmp/release-assets/*.zip
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  deploy-github-pages:
+    needs: build
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deploy.outputs.page_url }}
+    steps:
+      - uses: actions/deploy-pages@v4
+        id: deploy
+
+  deploy-netlify:
+    needs: build
+    if: github.event_name != 'pull_request' && (github.event.inputs.deploy_target == 'all' || github.event.inputs.deploy_target == 'netlify')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: sbti-dist
+          path: dist
+      - uses: nwtgck/actions-netlify@v3
+        with:
+          publish-dir: dist
+          production-deploy: true
+        env:
+          NETLIFY_AUTH_TOKEN: ${{ secrets.NETLIFY_AUTH_TOKEN }}
+          NETLIFY_SITE_ID: ${{ secrets.NETLIFY_SITE_ID }}
+
+  deploy-cloudflare:
+    needs: build
+    if: github.event_name != 'pull_request' && (github.event.inputs.deploy_target == 'all' || github.event.inputs.deploy_target == 'cloudflare')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: sbti-dist
+          path: dist
+      - run: npm install -g wrangler
+      - run: wrangler pages deploy dist --project-name=sbti-personality-test
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+
+  deploy-edgeone:
+    needs: build
+    if: github.event_name != 'pull_request' && (github.event.inputs.deploy_target == 'all' || github.event.inputs.deploy_target == 'edgeone')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: sbti-dist
+          path: dist
+      - run: npm install -g @edgeone/cli
+      - run: edgeone pages deploy dist --project sbti-personality-test --production
+        env:
+          EDGEONE_API_TOKEN: ${{ secrets.EDGEONE_API_TOKEN }}
+
+  deploy-vercel:
+    needs: build
+    if: github.event_name != 'pull_request' && (github.event.inputs.deploy_target == 'all' || github.event.inputs.deploy_target == 'vercel')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: sbti-dist
+          path: dist
+      - uses: amondnet/vercel-action@v25
+        with:
+          vercel-token: ${{ secrets.VERCEL_TOKEN }}
+          vercel-org-id: ${{ secrets.VERCEL_ORG_ID }}
+          vercel-project-id: ${{ secrets.VERCEL_PROJECT_ID }}
+          vercel-args: --prod
+
+  deploy-gitee:
+    needs: build
+    if: github.event_name != 'pull_request' && (github.event.inputs.deploy_target == 'all' || github.event.inputs.deploy_target == 'gitee')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: |
+          git remote add gitee https://oauth2:${{ secrets.GITEE_TOKEN }}@gitee.com/${{ secrets.GITEE_REPO }}.git 2>/dev/null || true
+          git push gitee main --force
+          curl -s -X POST "https://gitee.com/api/v5/repos/${{ secrets.GITEE_REPO }}/pages/builds" -H "Content-Type: application/json" -d "{\"access_token\":\"${{ secrets.GITEE_TOKEN }}\",\"branch\":\"main\"}" || true
+
+  deploy-gitlab:
+    needs: build
+    if: github.event_name != 'pull_request' && (github.event.inputs.deploy_target == 'all' || github.event.inputs.deploy_target == 'gitlab')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - run: |
+          git remote add gitlab https://oauth2:${{ secrets.GITLAB_TOKEN }}@gitlab.com/${{ secrets.GITLAB_REPO }}.git 2>/dev/null || true
+          git push gitlab main --force
+
+  notify:
+    needs: [build,package,release,deploy-github-pages,deploy-netlify,deploy-cloudflare,deploy-edgeone,deploy-vercel,deploy-gitee,deploy-gitlab]
+    if: always() && github.event_name == 'push'
+    runs-on: ubuntu-latest
+    steps:
+      - run: |
+          echo "## Deployment Summary" >> $GITHUB_STEP_SUMMARY
+          echo "| Platform | Status |" >> $GITHUB_STEP_SUMMARY
+          echo "|----------|--------|" >> $GITHUB_STEP_SUMMARY
+          echo "| Build | ${{ needs.build.result }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Packages | ${{ needs.package.result }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Release | ${{ needs.release.result }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| GitHub Pages | ${{ needs.deploy-github-pages.result }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Netlify | ${{ needs.deploy-netlify.result }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Cloudflare | ${{ needs.deploy-cloudflare.result }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| EdgeOne | ${{ needs.deploy-edgeone.result }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Vercel | ${{ needs.deploy-vercel.result }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Gitee | ${{ needs.deploy-gitee.result }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| GitLab | ${{ needs.deploy-gitlab.result }} |" >> $GITHUB_STEP_SUMMARY

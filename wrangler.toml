@@ -1,0 +1,12 @@
+name = "sbti-personality-test"
+compatibility_date = "2024-12-01"
+pages_build_output_dir = "dist"
+
+[build]
+  command = "npm run build"
+
+# 如果使用 Functions（可选）
+# [[redirects]]
+#   from = "/*"
+#   to = "/index.html"
+#   status = 200
